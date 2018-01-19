@@ -146,7 +146,7 @@ def genericHandler(evt) {
     log.debug("source: ${evt.source}")
     log.debug("unit: ${evt.unit}")
 */
-/*
+
     def json = "{"
     json += "\"device\":\"${evt.device}\","
     json += "\"deviceId\":\"${evt.deviceId}\","
@@ -154,8 +154,6 @@ def genericHandler(evt) {
     json += "\"location\":\"${evt.location}\","
     json += "\"event\":\"smartthings\""
     json += "}"
-*/
-	def json = evt;
 
 	log.debug("JSON: ${json}")
 
