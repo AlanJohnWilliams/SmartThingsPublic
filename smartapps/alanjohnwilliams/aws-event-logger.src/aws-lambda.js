@@ -19,42 +19,57 @@ var TABLE_NAME = "frisco";
 
 var dynamodb = new doc.DynamoDB();
 
-function recursivePut(context,events,index,attempt,success,failure) {
-    var event = events[index];    
+function recursivePut(events,s,callback) {
+
+    var event = events[s.index];    
     event.time = Date.parse(event.time);
+    for (var propName in event) { 
+        if (event[propName] === null || event[propName] === undefined || event[propName] === "") {
+            delete event[propName];
+        }
+    }
     console.log("Loading:\n", JSON.stringify(event));
 
     // Put into DynamoDB!
-    attempt +=1;
+    s.attempted +=1;
     dynamodb.putItem({
         "TableName": TABLE_NAME,
         "Item": event
     }, function(err, data) {
         if (err) {
-            failure +=1;
+            s.failed +=1;
             console.log("Dynamo Failure: " + JSON.stringify(data, null, "  "));
             console.log("Dynamo Failure: " + err);
         } else {
-            success +=1;
+            s.succeed +=1;
         }
-        index +=1;
-        if(index<events.length) {
-            recursivePut(context,events,index,attempt,success,failure);
+        s.index +=1;
+        console.log("Progress: "+s.attempted+" attempts, "+s.failed+" failed, "+s.succeed+" succeed.");
+        if(s.index<events.length) {
+            console.log("Recursive Call. Iteration "+s.attempted+" of "+s.eventcount);
+            recursivePut(events,s,callback);
         } else {
-            if(failure > 0) {
-                //% Incorporate call back into smartthings cloud
-                console.log("Returning: Failed. "+attempt+" attempts, "+failure+" failed, "+success+" succeed.");
-                context.fail("ERROR: Dynamo failed. "+attempt+" attempts, "+failure+" failed, "+success+" succeed.");
+            if(s.failed > 0) {
+                var msg = "Failed. "+s.attempted+" attempts, "+s.failed+" failed, "+s.succeed+" succeed.";
+                console.log(msg);
+                callback(new Error(msg),response);
             } else {
-                //% Incorporate call back into smartthings cloud
-                console.log("Returning: Succeed. "+attempt+" attempts, "+failure+" failed, "+success+" succeed.");
-                context.succeed({ success: true });
+                var msg = "Succeed. "+s.attempted+" attempts, "+s.failed+" failed, "+s.succeed+" succeed.";
+                console.log(msg)
+                var response = {
+                    "statusCode": 200,
+                    "headers": {
+                    },
+                    "body": JSON.stringify(s),
+                    "isBase64Encoded": false
+                };
+                callback(null,response);
             }
         }
 	});    
 }
 
-exports.handler = function(request, context) {
+exports.handler = function(request, context, callback) {
     //console.log("Request received:\n", JSON.stringify(request));
     //console.log("Context received:\n", JSON.stringify(context));
     //console.log("Events received:\n", JSON.stringify(request.body.events));
@@ -63,12 +78,20 @@ exports.handler = function(request, context) {
     var body = JSON.parse(request.body);
     if("events" in body) {
         var events = body.events;
-        var index = 0;
-        var attempt = 0;
-        var success = 0;
-        var failure = 0;
-        if(events.length > 0) recursivePut(context,events,index,attempt,success,failure);
-    }else{
-        context.fail("ERROR: no events in request payload.");
+        var s = {
+            index: 0,
+            attempted: 0,
+            succeed: 0,
+            failed: 0,
+            success: true,
+            eventcount: events.length
+        };
+        if(s.eventcount > 0) {
+            recursivePut(events,s,callback);
+        }else{
+            callback(new Error("Failure: 400: events field is empty"));
+        }
+    } else {
+        callback(new Error("Failure: 400: No events field in payload"));
     }
 }
