@@ -47,7 +47,7 @@ preferences {
 	page(name: "attributeExclusionsPage")
 	page(name: "optionsPage")
 	page(name: "aboutPage")
-	page(name: "createTokenPage")
+	//page(name: "createTokenPage")
 }
 
 def version() { return "01.04.01" }
@@ -104,7 +104,7 @@ private getLoggingStatusContent() {
 			def status = getFormattedLoggingStatus()
 			
 			paragraph required: false,
-				"Total Events Logged: ${status.totalEventsLogged}\nAvailable Log Space: ${status.freeSpace}\nLast Execution:\n - Result: ${status.result}\n - Events From: ${status.start}\n - Events To: ${status.end}\n - Logged: ${status.eventsLogged}\n - Run Time: ${status.runTime}"
+				"Last Execution:\n - Result: ${status.result}\n - Events From: ${status.start}\n - Events To: ${status.end}\n - Logged: ${status.eventsLogged}\n - Run Time: ${status.runTime}"
 		}
 	}
 }
@@ -270,13 +270,13 @@ private getOptionsPageContent() {
         input "xApiKey", "text", title: "x-api-key", required: true
 		//paragraph "Blah, blah...."
 	}
-	
+/*	
 	if (state.installed) {
 		section("OAuth Token") {
 			getPageLink("createTokenPageLink", "Generate New OAuth Token", "createTokenPage", null, state.endpoint ? "" : "The SmartApp was unable to generate an OAuth token which usually happens if you haven't gone into the IDE and enabled OAuth in this SmartApps settings.  Once OAuth is enabled, you can click this link to try again.")
 		}
 	}
-	
+*/	
 	section("Live Logging Options") {
 		input "logging", "enum",
 			title: "Types of messages to write to Live Logging:",
@@ -287,6 +287,7 @@ private getOptionsPageContent() {
 	}
 }
 
+/*
 def createTokenPage() {
 	dynamicPage(name:"createTokenPage") {
 		
@@ -303,6 +304,7 @@ def createTokenPage() {
 		}
 	}
 }
+*/
 
 private getPageLink(linkName, linkText, pageName, args=null,desc="",image=null) {
 	def map = [
@@ -350,7 +352,7 @@ private disposeAppEndpoint() {
 
 def installed() {	
 	logTrace "Executing installed()"
-	initializeAppEndpoint()
+	//initializeAppEndpoint()
 	state.installed = true
 }
 
@@ -361,7 +363,7 @@ def updated() {
 	unschedule()
 	unsubscribe()
 	
-	initializeAppEndpoint()
+	//initializeAppEndpoint()
 	
 	if (settings?.logFrequency && settings?.maxEvents && settings?.logDesc != null && verifyWebAppUrl(settings?.httpUrl,settings?.xApiKey)) {
 		state.optionsConfigured = true
@@ -417,22 +419,42 @@ def startLogNewEvents() {
 }
 
 def logNewEvents() {	
-	def status = state.loggingStatus ?: [:]
+	def status = state.loggingStatus ?: [:]	
+	status.finished = null
+	status.started = new Date().time
 	
 	// Move the date range to the next position unless previous attempt failed last time
 	if (!status.success) {
-		status.lastEventTime = status.firstEventTime
+        if(!status.retry) {
+         	status.retry = 0
+        }
+        def start = getFirstEventTimeMS(status.lastEventTime)
+        def startTime = new Date(start)
+        def stopTime = new Date(getNewLastEventTimeMS(status.started, (start + 1000)))
+
+    	if(status.retry < 10) {
+        	//% Retry logic might not be working. Saw status.retry not getting incremented when failed call
+            logDebug "Re attempt ${status.retry} for events in window ${startTime} to ${stopTime}"
+            status.retry += 1;
+			status.lastEventTime = status.firstEventTime
+        } else {
+        	// reset and move on. means we will miss events here, but the assumption is that if we fail 10 times
+            // then there is probably something in the data causing the failure.
+            logDebug "FATAL: Reached maximum number of attempts ${retry} for events in window ${startTime} to ${stopTime}"
+            //% Ideally dump JSON out for the events in this window to a log
+			status.retry = 0;
+        }
 	}
-	
+    
 	status.success = null
-	status.finished = null
 	status.eventsLogged = 0
-	status.started = new Date().time
 	
+    //logDebug "Times 1: ${status.firstEventTime}, ${status.lastEventTime}"
 	status.firstEventTime = getFirstEventTimeMS(status.lastEventTime)
-	
+    //logDebug "Times 2: ${status.firstEventTime}, ${status.lastEventTime}"
 	status.lastEventTime = getNewLastEventTimeMS(status.started, (status.firstEventTime + 1000))
-	
+	//logDebug "Times 3: ${status.firstEventTime}, ${status.lastEventTime}"
+    
 	def startDate = new Date(status.firstEventTime + 1000)
 	def endDate = new Date(status.lastEventTime)
 	
@@ -446,6 +468,16 @@ def logNewEvents() {
 	
 	if (events) {
 		postEventsToAWS(events)
+
+		// If successful, and we are behind, then let's catch up
+        //% Need to debug and limit -- current code will cause run away recursion with
+        //% multiple instances running when the next call to the handler is made
+        /*
+		if(state.loggingStatus.success && state.loggingStatus.lastEventTime < status.started) {
+        	logDebug "Trying to catch up. Recalling logNewEvents()."
+            logNewEvents()
+        }   
+        */
 	}
 	else {		
 		state.loggingStatus.success = true
@@ -497,12 +529,6 @@ private getLogCatchUpFrequencySettingMS() {
 
 private postEventsToAWS(events) {
    
-    //log.debug("Events:\n${events}\n")
-    
-//	def jsonOutput = new groovy.json.JsonOutput()
-//	def jsonData = jsonOutput.toJson([
-//		"postBackUrl": "${state.endpoint}update-logging-status",
-//		"logDesc": (settings?.logDesc != false),
 	def data = [
 		"events": events
 	]
@@ -515,24 +541,46 @@ private postEventsToAWS(events) {
 		uri: "${settings?.httpUrl}",
         headers: [
             "x-api-key": "${settings?.xApiKey}",
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "X-Amz-Invocation-Type": "RequestResponse"
         ],
 		body: payload
     ]	
 
-	//log.debug("JSON PARAMS: ${params}")
-
     try {
-        httpPostJson(params)
+        httpPostJson(params) { resp ->
+        	//% Update Status
+            /*
+        	resp.headers.each {
+            	logDebug "${it.name} : ${it.value}"
+            } 
+			logDebug "response contentType: ${resp.contentType}"
+			logDebug "response data: ${resp.data}"
+            */
+			def status = state.loggingStatus ?: [:]              
+			status.success = resp.data.success
+			status.finished = new Date().time
+			status.eventsLogged = resp.data.succeed	
+            status.retry = 0
+			state.loggingStatus = status
+			logLoggingStatus()
+    	}
     } catch (groovyx.net.http.HttpResponseException ex) {
         if (ex.statusCode != 200) {
-            log.debug "Unexpected response error: ${ex.statusCode}"
-            log.debug ex
-            log.debug ex.response.contentType
+            logDebug "Unexpected response error: ${ex.statusCode}"
+            logDebug ex
+            logDebug ex.response.contentType
         }
+		def status = state.loggingStatus ?: [:]              
+		status.success = false
+		status.finished = new Date().time
+		status.eventsLogged = 0	
+		state.loggingStatus = status
+		logLoggingStatus()
     }
 }
 
+/*
 private initializeAppEndpoint() {		
 	try {
 		if (!state.endpoint) {
@@ -553,6 +601,7 @@ private getInitializeEndpointErrorMessage() {
 	return "This SmartApp requires OAuth so please follow these steps to enable it:\n1.  Go into the My SmartApps section of the IDE\n2. Click the pencil icon next to this SmartApp to open the properties\n3.Click the 'OAuth' link\n4. Click 'Enable OAuth in Smart App'."
 }
 
+
 mappings {
 	path("/update-logging-status") {
 		action: [
@@ -560,35 +609,12 @@ mappings {
 		]
 	}	
 }
+*/
 
-def api_updateLoggingStatus() {
-	def status = state.loggingStatus ?: [:]
-	def data = request.JSON
-	if (data) {
-		status.success = data.success
-		status.logIsFull = data.logIsFull
-		status.finished = new Date().time
-		status.eventsLogged = data.eventsLogged
-		status.totalEventsLogged = data.totalEventsLogged
-		status.freeSpace = data.freeSpace
-		
-		if (data.error) {
-			logDebug "${getWebAppName()} Reported: ${data.error}"
-		}
-	}
-	else {
-		status.success = false
-		logDebug "The ${getWebAppName()} postback has no data."
-	}	
-	state.loggingStatus = status
-	logLoggingStatus()
-}
+
 
 private logLoggingStatus() {
 	def status = getFormattedLoggingStatus()
-	if (status.logIsFull) {
-		logWarn "The Google Sheet is Out of Space"
-	}
 	if (state.loggingStatus?.success) {
 		logDebug "${getWebAppName()} logged ${status.eventsLogged} events between ${status.start} and ${status.end} in ${status.runTime}."			
 	}
@@ -606,8 +632,6 @@ private getFormattedLoggingStatus() {
 		end:  getFormattedLocalTime(safeToLong(status.lastEventTime)),
 		runTime: "${((safeToLong(status.finished) - safeToLong(status.started)) / 1000)} seconds",
 		eventsLogged: "${String.format('%,d', safeToLong(status.eventsLogged))}",
-		totalEventsLogged: "${String.format('%,d', safeToLong(status.totalEventsLogged))}",
-		freeSpace: status.freeSpace
 	]
 }
 
